@@ -1,0 +1,704 @@
+#!C:/Perl/bin/perl -w
+use strict;
+$|++;
+
+eval 'use Wamp';    # Use WinAmp for sound effects
+if ($@) {
+    print "Get the WinAmp Control module (Wamp.pm) from Peter\n";
+}
+
+use OpenGL qw/ :all /;
+
+eval 'use OpenGL::Image';
+my $hasImage = !$@;
+my $hasIM_635 = $hasImage && OpenGL::Image::HasEngine('Magick','6.3.5');
+
+eval 'use Image::Magick';
+my $hasIM = !$@;
+
+use Math::Trig;
+
+# PARALLEL PORT JOYSTICK
+
+use Parport qw( initParPort 
+                addCallbacks
+                removeCallbacks
+                checkParPort );
+
+
+my $ROOT;        # Root directory of the application files
+my $gJets;       # Rocket sound is loaded
+my $gIdleTime;   # Time of last user interaction
+my $hasFBO = 0;
+my $hasVBO = 0;
+my $hasImagePointer = 0;
+
+my $Window_ID;
+my $Window_Width = 1460;
+my $Window_Height = 1036;
+my $Save_Width;
+my $Save_Height;
+
+my $fc;    # Frame counter
+
+my ($luna, $terra, $sol);
+
+my @Tex_Files = qw(
+		   halfmoon.tga
+		   halfearth.tga
+		   m3.jpg
+		   e1.tga
+		   m1.tga
+		   e2.tga
+		   sol.tga
+		    );
+
+my $FBO_On = 0;
+
+my @TextureID_image;
+my $X_Rot;   
+my $Y_Rot;   
+my $X_Speed; 
+my $Y_Speed; 
+my $gSpeed_Increment;
+my $X_Off; 
+
+# Vertex Buffer Object data
+my($VertexObjID,$TexCoordObjID,$IndexObjID);
+
+my @verts =
+(
+  15.3,  3.0, -3.0,  #Half Moon (moved)
+  15.3, -3.0, -3.0,
+  15.3, -3.0,  3.0,
+  15.3,  3.0,  3.0,
+ 
+  -15.3, -3.0, -3.0,    # Half Earth
+  -15.3, -3.0,  3.0,
+  -15.3,  3.0,  3.0,
+  -15.3,  3.0, -3.0,
+
+  22.0,  14.0, -14.0,  # MoonScape 1
+  22.0, -14.0, -14.0,
+  22.0, -14.0,  14.0,
+  22.0,  14.0,  14.0,
+
+  -20.0, -14.0, -14.0,    # EarthScape 1 moved to old sun
+  -20.0, -14.0,  14.0,
+  -20.0,  14.0,  14.0,
+  -20.0,  14.0, -14.0,
+
+  24.0,  10.0,  -10.0, # MoonScape 2
+  24.0, -10.0,  -10.0,  
+  24.0, -10.0,   10.0,
+  24.0,  10.0,   10.0,
+
+# Move Earth to where the Sun was
+
+  -25.0, -14.0, -14.0,    # EarthScape 2 moved to old sun
+  -25.0, -14.0,  14.0,
+  -25.0,  14.0,  14.0,
+  -25.0,  14.0, -14.0,
+
+# Moved sun to where the moon was
+
+  -3.0, -3.0, -20.3,  # Sun at (0,0)
+  -3.0,  3.0, -20.3,
+   3.0,  3.0, -20.3,
+   3.0, -3.0, -20.3,
+);
+
+
+my $verts = OpenGL::Array->new_list(GL_FLOAT,@verts);
+
+my @texcoords;
+my $texcoords;
+
+my @indices = (0..23);
+my $indices = OpenGL::Array->new_list(GL_UNSIGNED_INT,@indices);
+
+my $FrameCount = 0;
+my $FrameRate = 0;
+my $last=0;
+
+my ($earth,$moon,$left,$right,$down,$up);
+my $minTilt;
+my $debug;
+my $reportcon;
+
+BEGIN {
+
+    ($earth,$moon,$left,$right,$down,$up) = (-1,1,-120, 120, -20, 20);
+    $minTilt = $up;
+    $debug = 1;
+    $reportcon = 1;
+
+
+     for ( qw( C:/cygwin/home/peter/openGL/apollo
+	       C:/cygwin/home/peterr/openGL/apollo
+	       C:/Apache2/htdocs/Museum/Aerospace/apollo ) )
+     {
+	 if (-e $_) { $ROOT =  $_; last; }
+     }
+    die "Can't locate suitable root directory" unless $ROOT;
+    print "Using [$ROOT] as the root directory\n";
+
+$X_Rot   =  0.0;
+$Y_Rot   =  0.0;
+$X_Speed =  0.0;
+$Y_Speed = -0.3;
+$X_Off   =  0.0;
+
+$gSpeed_Increment = 0.01;
+$gIdleTime = time();
+$gJets     = 0;
+
+    for (0..6)
+    {
+	push(@texcoords,
+	     (  0.005, 0.005,
+		0.995, 0.005,
+		0.995, 0.995,
+		0.005, 0.995 )); 
+    }
+    $texcoords = OpenGL::Array->new_list(GL_FLOAT,@texcoords);
+    $fc        = 0;
+    ($luna, $terra, $sol) = (0, 1, 6 );
+
+
+} # END OF BEGIN BLOCK
+
+{
+my ($delta, $gDoTime, $gDoFunc, @gDoArgs);
+
+    sub afterUsed { return $gDoFunc; }
+
+    sub after
+    {
+	if ( $gDoFunc )
+	{
+	    print "After is already in use\n";
+	}
+	else
+	{
+	    $delta = shift;
+	    $gDoTime = time() + $delta;
+	    $gDoFunc = shift;
+	    @gDoArgs = @_;
+	}
+    }  # end of after()
+
+    sub testafter
+    {
+	if ($gDoTime && ( $delta < 1.0 || time() >= $gDoTime) )
+	{
+	    my $gf = $gDoFunc;
+	    $gDoFunc = undef;  # So this function can call after()
+	    $gf->(@gDoArgs);
+            if (!defined($gDoFunc))
+	    {
+		$gDoTime = undef;
+		@gDoArgs = ();
+	    }
+	}
+    } # End of testafter()
+
+} # End of Block with local $delta
+
+
+sub angleRange
+{
+    if ($X_Rot < 0.0)       { $X_Rot = $X_Rot + 360;  }
+    elsif ( $X_Rot >= 360 ) { $X_Rot = $X_Rot - 360;  }
+
+    if ($terra > 1)   # Close to the Earth
+    {
+	if    ($X_Rot > 25 && $X_Rot <= 180) { $X_Rot = 25; $X_Speed=0.0; }
+	elsif ($X_Rot > 180 && $X_Rot <335 ) { $X_Rot = 335; $X_Speed=0.0; }
+
+	if    ($Y_Rot > 205 && $Y_Rot <= 360) { $Y_Rot = 205; $Y_Speed = 0.0; }
+	elsif ($Y_Rot < 155 && $Y_Rot > 0)    { $Y_Rot = 155; $Y_Speed = 0.0; }
+    }
+    else
+    {
+	if ($Y_Rot < 0.0)       { $Y_Rot = $Y_Rot + 360;  }
+	elsif ( $Y_Rot >= 360 ) { $Y_Rot = $Y_Rot - 360;  }
+
+	if ($luna > 1)  # Close to the Moon
+        {
+	    if    ($X_Rot > 25 && $X_Rot <= 180) { $X_Rot = 25; $X_Speed=0.0;  }
+	    elsif ($X_Rot > 180 && $X_Rot < 335) { $X_Rot = 335; $X_Speed=0.0; }
+
+	    if    ($Y_Rot > 25 && $Y_Rot <= 180) { $Y_Rot = 25; $Y_Speed=0.0;  }
+	    elsif ($Y_Rot > 180 && $Y_Rot < 335) { $Y_Rot = 335; $Y_Speed=0.0; }
+	}
+    }
+}
+
+sub spinTo
+{
+    ( $X_Speed, $Y_Speed ) = ( 0.1, 0.1 );
+    stopAt(@_);
+}
+
+sub stopAt
+{
+    my ($XAngle, $YAngle) = @_;
+    my $delta = (($X_Rot%360 + 360)%360) - $XAngle;
+
+    if    (abs($delta) <  2 )              { $X_Speed = 0.0;  }
+    elsif (abs($delta) <  6 && $X_Speed > 0.02) { $X_Speed = 0.02; }
+    elsif (abs($delta) < 14 && $X_Speed > 0.06) { $X_Speed = 0.06; }
+
+    if ($delta > 0) { $X_Speed = -$X_Speed; }
+
+
+    $delta = (($Y_Rot%360 + 360)%360) - $YAngle;
+
+    if    ($delta <  2 )                   { $Y_Speed = 0.0;  }
+    elsif ($delta <  6 && $Y_Speed > 0.02) { $Y_Speed = 0.02; }
+    elsif ($delta < 14 && $Y_Speed > 0.06) { $Y_Speed = 0.06; }
+
+    if ($delta < 0) { $Y_Speed = -$Y_Speed; }
+
+    after(0.1, \&stopAt, $XAngle, $YAngle) if ($X_Speed || $Y_Speed);
+}
+
+sub ourInit
+{
+  my ($Width, $Height) = @_;
+
+  # Load Rocket noise, don't play it, and hide Winamp.
+  cmdW("load $ROOT/audio/hiss2.mp3");
+  cmdW('pause');
+  cmdW("minimize");
+
+  # Initialize VBOs if supported
+  if ($hasVBO)
+  {
+      print "has VBO\n";
+    ($VertexObjID,$TexCoordObjID,$IndexObjID) = glGenBuffersARB_p(3);
+
+    $verts->bind($VertexObjID);
+    glBufferDataARB_p(GL_ARRAY_BUFFER_ARB, $verts, GL_STATIC_DRAW_ARB);
+    glVertexPointer_c(3, GL_FLOAT, 0, 0);
+
+    $texcoords->bind($TexCoordObjID);
+    glBufferDataARB_p(GL_ARRAY_BUFFER_ARB, $texcoords, GL_STATIC_DRAW_ARB);
+    glTexCoordPointer_c(2, GL_FLOAT, 0, 0);
+
+    $indices->bind($IndexObjID);
+    glBufferDataARB_p(GL_ELEMENT_ARRAY_BUFFER_ARB, $indices, GL_STATIC_DRAW_ARB);
+  }
+
+  ourBuildTextures();
+  glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_DECAL);
+
+  glEnable(GL_TEXTURE_2D);
+  glDisable(GL_LIGHTING);
+
+  glClearColor(0.0, 0.0, 0.0, 0.0);
+
+  glClearDepth(1.0);
+  glDepthFunc(GL_LESS);
+
+  cbResizeScene($Width, $Height);
+
+  glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
+  glEnable(GL_COLOR_MATERIAL);
+}
+
+# Load pictures(textures) 3 of the moon, 3 of earth and one sun
+
+sub ourBuildTextures
+{
+  my $gluerr;
+
+  my ( @img, @eng, @ver );
+
+  print "Images [ ";
+
+for my $i (0..$#Tex_Files)
+ {
+     my ( $Tex_Width, $Tex_Height, $Tex_Format, $Tex_Type, $Tex_Size);
+     my @Tex_Pixels;
+
+     $TextureID_image[$i] = glGenTextures_p(1);
+
+     my $filename = "$ROOT/images/$Tex_Files[$i]";
+
+     if ($hasImage && -e $filename)
+     {
+	 print "$Tex_Files[$i] ";
+	 $img[$i] = new OpenGL::Image(source=>$filename);
+	 ($eng[$i],$ver[$i]) = $img[$i]->Get('engine','version');
+	 
+	 ($Tex_Width,$Tex_Height) = $img[$i]->Get('width','height');
+	 
+	 ($Tex_Type,$Tex_Format,$Tex_Size) = 
+	     $img[$i]->Get('gl_internalformat','gl_format','gl_type');
+
+	 $Tex_Pixels[$i] = $img[$i]->GetArray();
+     }
+     glBindTexture(GL_TEXTURE_2D, $TextureID_image[$i]);
+
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+		     GL_NEAREST_MIPMAP_LINEAR);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+		     GL_NEAREST_MIPMAP_LINEAR);
+
+     if (defined($Tex_Pixels[$i]) && defined($Tex_Pixels[$i]->ptr())
+	 && 
+	 ($gluerr = gluBuild2DMipmaps_c(GL_TEXTURE_2D, $Tex_Type,
+	     $Tex_Width, $Tex_Height, $Tex_Format, $Tex_Size,
+	     $Tex_Pixels[$i]->ptr())))
+     {
+	 printf STDERR "GLULib%s\n", gluErrorString($gluerr);
+	 exit(-1);
+     }
+ } # end for (# of pictures)
+ print "]\n";
+
+ glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_DECAL);
+}
+
+sub cbRenderOnce
+{
+    glEnable(GL_TEXTURE_2D);
+    glDisable(GL_LIGHTING);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+sub cbRenderScene
+{
+  if ( (++$fc % 20) == 0 ) # Test Parallel port often 
+  {
+      checkParPort();
+      if ( ($fc % 100) == 0 )  # Check timed functions
+      {
+	  testafter();
+	  if ($fc % 5000 == 0 )  # Check CapCom chatter
+	  {
+	      randomCapCom();
+	  }
+      }
+  }
+
+  glLoadIdentity();           # Reset to 0,0,0; no rotation, no scaling.
+
+#  Old stuff
+#  $X_Rot += $X_Speed;
+#  $Y_Rot += $Y_Speed;
+#  angleRange();
+
+  my $tmp = $X_Off/20;
+
+  ($tmp, $Y_Rot, $X_Rot) = addConstrain($tmp, 0, $Y_Rot, $Y_Speed, $X_Rot, $X_Speed );
+
+  glRotatef($X_Rot, 1.0, 0.0, 0.0);
+  glRotatef($Y_Rot, 0.0, 1.0, 0.0); # Rotate the calculated amount
+  glTranslatef($X_Off, 0.0, 0.0);  # Move the object back from the screen
+  glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); # Clear color/depth
+  glEnable(GL_COLOR_MATERIAL);
+  glEnableClientState(GL_VERTEX_ARRAY);
+  glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+  glBindTexture(GL_TEXTURE_2D,$TextureID_image[$luna]);  # MOON
+  glDrawArrays(GL_QUADS, $luna*4, 4);  # Luna
+
+  glBindTexture(GL_TEXTURE_2D,$TextureID_image[$terra]); # EARTH
+  glDrawArrays(GL_QUADS, $terra*4, 4);  # Terra
+
+  glBindTexture(GL_TEXTURE_2D,$TextureID_image[$sol]);   # SUN
+  glDrawArrays(GL_QUADS, 24, 4);  # Sol
+
+  glBindTexture(GL_TEXTURE_2D,0);
+  glDisable(GL_COLOR_MATERIAL);
+  glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+  glDisableClientState(GL_VERTEX_ARRAY);
+  glutSwapBuffers();
+}
+
+sub cbKeyPressed
+{
+  my $key = shift;
+  my $c = uc chr $key;
+  $gIdleTime = time();
+  if ($key == 27 or $c eq 'Q')
+  {
+    cmdW("QUIT");
+    exit(0);
+  }
+  elsif ($c eq 'M') { spinTo(0.0,  90.0);   }
+  elsif ($c eq 'S') { spinTo(0.0,   0.0); }
+  elsif ($c eq 'E') { spinTo(0.0, -90.0); }
+  elsif ($c eq 'R') { $X_Speed = -$X_Speed; $Y_Speed = -$Y_Speed; }
+}
+
+sub zoom_in  { hiss(); xDirection(1);  }
+sub zoom_out { hiss(); xDirection(-1); }
+sub zoom_off { cmdW('pause'); }
+
+sub plusX    { 
+      hiss();
+      $X_Speed += $gSpeed_Increment;
+  }
+
+sub minusX   { 
+      hiss();
+      $X_Speed -= $gSpeed_Increment;
+  }
+
+sub plusY    { 
+      hiss();
+      $Y_Speed += $gSpeed_Increment;
+  }
+
+sub minusY   {
+      hiss();
+      $Y_Speed -= $gSpeed_Increment;
+  }
+
+sub stopY   { cmdW('pause'); }
+sub stopX   { cmdW('pause'); }
+
+{
+     my @capcom = qw(  
+                      launch.wav
+		      neil.wav
+       		      landing.wav
+		      lightning.mp3
+		      soil.mp3
+		      flash.mp3
+	            );
+
+    sub randomCapCom
+    {
+	if ( (time() - $gIdleTime) > 35 )
+	{
+	    $gIdleTime = time();
+	    my $file = $capcom[	int (rand() * ($#capcom + 1)) ];
+	    cmdW("plclear");
+	    cmdW("load $ROOT/audio/$file");
+	    $gJets = 0; # rocket sounds no longer loaded
+	    cmdW("play");
+	}
+    }
+}
+
+# Move between the Moon and the Earth
+# Speed is adjusted (down) as we approach either surface
+sub xDirection
+{
+ my $xdir = shift;  # +- toward moon/earth
+
+ $xdir = -$xdir  if ( $Y_Rot > 0 );
+
+ my $az = abs($X_Off);
+
+ if ($az < 10)
+ {
+     ( $luna, $terra ) = ( 0, 1 );
+     $X_Off += 0.05 * $xdir ;
+     return;
+ }
+ elsif ( $az < 12 )
+ {
+     if ($luna != 0 || $terra != 1) { print "luna=$luna, terra=$terra\n"; }
+
+     ( $luna, $terra ) = ( 0, 1 );
+
+     $X_Off += 0.02 * $xdir ;
+     return;
+ }
+ if ($X_Off > 0) { $terra = 3; }
+ else            { $luna = 2;  }
+
+ if ($az < 19)
+ {
+     $X_Off += 0.01 * $xdir ;
+     return;
+ }
+
+ if ($X_Off > 0) { $terra = 5; }
+ else            { $luna = 4;  }
+
+ $X_Off += 0.005*$xdir unless ($xdir * $X_Off > 0);
+}
+
+sub hiss
+{
+  my $now = time();
+  if ( $now - $gIdleTime > 1 )
+  {
+      $gIdleTime = $now;
+      if ( !$gJets ) # Rocket sound not loaded into WinAmp
+      {
+	  cmdW("start");
+	  cmdW("plclear");
+	  cmdW("load $ROOT/audio/hiss2.mp3");
+	  cmdW("minimize");
+	  cmdW("play");
+	  $gJets = 1;
+      }
+      else
+      {
+	  cmdW("play");
+      }
+  }
+}
+
+sub cbSpecialKeyPressed
+{
+  my $key = shift;
+  hiss();
+
+  if    ($key == GLUT_KEY_PAGE_UP)  { xDirection(1);   }
+  elsif ($key == GLUT_KEY_PAGE_DOWN){ xDirection(-1);  }
+  elsif ($key == GLUT_KEY_UP)       { $X_Speed -= $gSpeed_Increment; }
+  elsif ($key == GLUT_KEY_DOWN)     { $X_Speed += $gSpeed_Increment; }
+  elsif ($key == GLUT_KEY_LEFT)     { $Y_Speed -= $gSpeed_Increment; }
+  elsif ($key == GLUT_KEY_RIGHT)    { $Y_Speed += $gSpeed_Increment; }
+}
+
+sub cbResizeScene
+{
+  my ($Width, $Height) = @_;
+  $Height = 1 if ($Height == 0);
+
+  glViewport(0, 0, $Width, $Height);
+
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  gluPerspective(45.0,$Width/$Height,0.1,100.0);
+
+  glMatrixMode(GL_MODELVIEW);
+
+  $Window_Width  = $Width;
+  $Window_Height = $Height;
+}
+
+#
+# Report once when a constraint is invoked,
+# Reset when no constraints are necessary.
+#
+# When one of the limits is reached, the speed in that
+# direction is set to zero, so that any movement in
+# the opposite direction will bring the image back.
+#
+
+# addConstrain($tmp, 0, $Y_Rot, $Y_Speed, $X_Rot, $X_Speed );
+
+sub addConstrain
+{
+    my ($x, $xi, $p, $pi, $t, $ti) = @_;
+    my $constrained = 0;
+    my $pos  =  $x + $xi;
+    my $pan  =  $p + $pi;
+    my $tilt =  $t + $ti;
+
+# addConstrain($tmp, 0, $Y_Rot, $Y_Speed, $X_Rot, $X_Speed );
+    
+    if    ($pos < $earth) { $pos = $earth }
+    elsif ($pos >  $moon) { $pos = $moon; }
+    
+    if    ( $pan < $left )
+    {
+	$pan = $left;
+	$Y_Speed = 0;
+	$constrained = 1;
+    }
+    elsif ($pan > $right)
+    {
+	$pan = $right;
+	$Y_Speed = 0;
+	$constrained = 1;
+    }
+
+    my $tiltFactor = (- $pos) * $pan;
+
+    $up = $minTilt + ( abs($tiltFactor) + $tiltFactor )*0.6;
+
+    $down = - $up;
+
+    if    ( $tilt < $down )
+    {
+	$tilt = $down;
+	$X_Speed = 0;
+	$constrained = 1;
+    }
+    elsif ( $tilt > $up   )
+    {
+	$tilt = $up;
+	$X_Speed = 0;
+	$constrained = 1;
+    }
+
+    if ($reportcon)
+    {
+	if ($constrained && $debug )
+	{
+	    $reportcon = 0;
+	    print "(POS $x , PAN  $p, TILT $t )\n";
+	    print "Tilt Factor ($tiltFactor)\n";
+	    print "TILT RANGE ($down, $up)\n";
+	    print "Tilt ( $t + $ti ) Constrained to $tilt\n";
+	    print "PAN RANGE ($left, $right)\n";
+	    print "Pan ( $p + $pi ) Constrained to $pan\n";
+	}
+    }
+    else
+    {
+	if (!$constrained && $debug )
+	{
+	    $reportcon = 1;
+	}
+    }
+    return($pos, $pan, $tilt);
+}
+
+    # THE PROGRAM BEGINS HERE
+
+    chdir($ROOT);
+    glutInit();
+    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH | GLUT_ALPHA);
+    glutInitWindowSize($Window_Width, $Window_Height);
+
+    $Window_ID = glutCreateWindow("APOLLO");
+     if (!OpenGL::glpCheckExtension('GL_ARB_vertex_buffer_object'))
+     {
+	 $hasVBO = 1;
+     }
+
+     if (!OpenGL::glpCheckExtension('GL_EXT_framebuffer_object'))
+     {
+	 $hasFBO = 1;
+	 $FBO_On = 1;
+	 print "has FBO\n";
+     }
+
+  glutDisplayFunc(\&cbRenderScene);
+  glutIdleFunc(\&cbRenderScene);
+  glutKeyboardFunc(\&cbKeyPressed);
+  glutSpecialFunc(\&cbSpecialKeyPressed);
+
+  ourInit($Window_Width, $Window_Height);
+
+  cbRenderOnce(); # Originally in cbRenderScene() but only needed once
+
+  # Slide window up and over to hide the menu bar and the borders
+  glutPositionWindow(-5,-5);
+
+  initParPort( -port => 'LPT2' );
+    for (0..3) { removeCallbacks($_); }
+    addCallbacks(0, \&plusY, \&stopY);
+    addCallbacks(1, \&minusY, \&stopY);
+    addCallbacks(2, \&plusX, \&stopX);
+    addCallbacks(3, \&minusX, \&stopX);
+
+  # After a second, spin around to point toward the earth.
+  after(1.0, \&spinTo, 0.0,  90.0);
+
+  glutMainLoop();
+
+__END__
